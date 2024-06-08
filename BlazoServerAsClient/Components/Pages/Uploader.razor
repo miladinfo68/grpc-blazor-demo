@@ -1,0 +1,108 @@
+﻿@page "/upload-file"
+
+@inject IServiceProvider sp;
+
+@using BlazoServerAsClient.Services
+@using Grpc.Core
+@using Shared.Protos
+
+
+@rendermode InteractiveServer
+
+
+<h3>Upload File</h3>
+
+<InputFile OnChange="HandleFileSelected" />
+
+<div class="progress">
+    <div class="progress-bar" role="progressbar" aria-valuenow="@_progress" aria-valuemin="0" aria-valuemax="100" style="width: @_progress%;">
+        @_progress%
+    </div>
+</div>
+
+
+@code {
+    private UploaderService.UploaderServiceClient _client;
+    private bool _isInitialized;
+
+    private CancellationTokenSource _cancelation;
+
+    private long _totalBytes;
+    private long _bytesUploaded;
+    private int _totalChunks;
+    private int _completedChunks;
+    private int _progress;
+
+
+    // protected override void OnInitialized()
+    // {
+    //     _client = sp.GetRequiredService<UploaderService.UploaderServiceClient>();
+    //     _isInitialized = true;
+    //     _cancelation = new CancellationTokenSource();
+    // }
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _client = sp.GetRequiredService<UploaderService.UploaderServiceClient>();
+            _isInitialized = true;
+            _cancelation = new CancellationTokenSource();
+        }
+
+    }
+
+
+
+    private async Task HandleFileSelected(InputFileChangeEventArgs e)
+    {
+        using (var fileStream = e.File.OpenReadStream())
+        {
+            var call = _client.UploadFile();
+            var responseReader = call.ResponseStream;
+            var requestWriter = call.RequestStream;
+
+            var buffer = new byte[4096];
+            int bytesRead;
+            long offset = 0;
+            int chunkNumber = 0;
+
+            var uploadTask = Task.Run(async () =>
+            {
+                while ((bytesRead = await fileStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                {
+                    await requestWriter.WriteAsync(new FileChunk
+                        {
+                            Data = Google.Protobuf.ByteString.CopyFrom(buffer, 0, bytesRead),
+                            Offset = offset,
+                            IsFinal = bytesRead < buffer.Length,
+                            ChunkNumber = ++chunkNumber
+                        });
+
+                    offset += bytesRead;
+                }
+
+                await requestWriter.CompleteAsync();
+            });
+
+            while (await responseReader.MoveNext())
+            {
+                var progress = responseReader.Current;
+                _bytesUploaded = progress.BytesUploaded;
+                _totalBytes = progress.TotalBytes;
+                _totalChunks = (int)progress.TotalChunks;
+                _completedChunks = (int)progress.CompletedChunks;
+                _progress = (int)((_completedChunks * 100.0) / _totalChunks);
+                StateHasChanged();
+            }
+
+            await uploadTask;
+        }
+    }
+
+
+    public void Dispose()
+    {
+        _cancelation.Cancel();
+    }
+}
